@@ -11,58 +11,54 @@
 # - every setting is an environment variable, see .env.example. `drupal` and
 #   `cron` also receive every variable of the Coolify environment.
 
-x-container:
-  &container-defaults
-    restart: unless-stopped
+x-container: &container-defaults
+  restart: unless-stopped
 
-x-hardening:
-  &hardening
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+x-hardening: &hardening
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
 
-x-mariadb-environment:
-  &mariadb-environment
-    MARIADB_DATABASE: ${MARIADB_DATABASE:-drupal}
-    MARIADB_USER: ${MARIADB_USER:-drupal}
-    MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD}
+x-mariadb-environment: &mariadb-environment
+  MARIADB_DATABASE: ${MARIADB_DATABASE:-drupal}
+  MARIADB_USER: ${MARIADB_USER:-drupal}
+  MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD}
 
-x-drupal-environment:
-  &drupal-environment
-    << : *mariadb-environment
-    DRUPAL_BASE_URL: ${DRUPAL_BASE_URL:?set DRUPAL_BASE_URL}
-    DRUPAL_FRONTEND_BASE_URL: ${DRUPAL_FRONTEND_BASE_URL:?set DRUPAL_FRONTEND_BASE_URL}
-    DRUPAL_HASH_SALT: ${DRUPAL_HASH_SALT:?set DRUPAL_HASH_SALT}
-    DRUSH_OPTIONS_URI: ${DRUPAL_BASE_URL:-}
-    # Parent domain of both hosts, leading dot. Scopes the session cookie.
-    SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:-}
-    # Coolify's Traefik reaches Drupal over the docker network.
-    REVERSE_PROXY_ADDRESSES: ${REVERSE_PROXY_ADDRESSES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
-    OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
-    OKB_COLLAB_CLIENT_ID: ${OKB_COLLAB_CLIENT_ID:?set OKB_COLLAB_CLIENT_ID}
-    OKB_COLLAB_CLIENT_SECRET: ${OKB_COLLAB_CLIENT_SECRET:?set OKB_COLLAB_CLIENT_SECRET}
-    ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-    OPENKB_RECIPES_DIR: ${OPENKB_RECIPES_DIR:-/app/recipes}
-    MAILER_DSN: ${MAILER_DSN:-}
-    MAIL_FROM: ${MAIL_FROM:-}
-    WEBSERVER_UPLOAD_MAX_SIZE: ${WEBSERVER_UPLOAD_MAX_SIZE:-100MB}
-    # Passed explicitly so they reach drupal and cron without an env_file.
-    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+x-drupal-environment: &drupal-environment
+  <<: *mariadb-environment
+  DRUPAL_BASE_URL: ${DRUPAL_BASE_URL:?set DRUPAL_BASE_URL}
+  DRUPAL_FRONTEND_BASE_URL: ${DRUPAL_FRONTEND_BASE_URL:?set DRUPAL_FRONTEND_BASE_URL}
+  DRUPAL_HASH_SALT: ${DRUPAL_HASH_SALT:?set DRUPAL_HASH_SALT}
+  DRUSH_OPTIONS_URI: ${DRUPAL_BASE_URL:-}
+  # Parent domain of both hosts, leading dot. Scopes the session cookie.
+  SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:-}
+  # Coolify's Traefik reaches Drupal over the docker network.
+  REVERSE_PROXY_ADDRESSES: ${REVERSE_PROXY_ADDRESSES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+  OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
+  OKB_COLLAB_CLIENT_ID: ${OKB_COLLAB_CLIENT_ID:?set OKB_COLLAB_CLIENT_ID}
+  OKB_COLLAB_CLIENT_SECRET: ${OKB_COLLAB_CLIENT_SECRET:?set OKB_COLLAB_CLIENT_SECRET}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+  OPENKB_RECIPES_DIR: ${OPENKB_RECIPES_DIR:-/app/recipes}
+  MAILER_DSN: ${MAILER_DSN:-}
+  MAIL_FROM: ${MAIL_FROM:-}
+  WEBSERVER_UPLOAD_MAX_SIZE: ${WEBSERVER_UPLOAD_MAX_SIZE:-100MB}
+  # Passed explicitly so they reach drupal and cron without an env_file.
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
 
 services:
   drupal:
     image: ${OPENKB_IMAGE_PREFIX:-ghcr.io/openkb-app/openkb}-drupal:${OPENKB_TAG:-1.0.0-beta2}
-    << : [*container-defaults, *hardening]
+    <<: [*container-defaults, *hardening]
     depends_on:
       mariadb:
         condition: service_healthy
       opensearch:
         condition: service_healthy
     environment:
-      << : *drupal-environment
+      <<: *drupal-environment
     expose:
       - "8080"
     volumes:
@@ -72,7 +68,7 @@ services:
   # Drupal cron every five minutes (supercronic), same image and files volume.
   cron:
     image: ${OPENKB_IMAGE_PREFIX:-ghcr.io/openkb-app/openkb}-drupal:${OPENKB_TAG:-1.0.0-beta2}
-    << : [*container-defaults, *hardening]
+    <<: [*container-defaults, *hardening]
     # The first start copies the image's files into the shared volume; two
     # containers starting at once collide, so drupal goes first.
     depends_on:
@@ -80,7 +76,7 @@ services:
         condition: service_started
     command: ["supercronic", "/etc/crontabs/openkb"]
     environment:
-      << : *drupal-environment
+      <<: *drupal-environment
     healthcheck:
       disable: true
     volumes:
@@ -88,7 +84,7 @@ services:
 
   frontend:
     image: ${OPENKB_IMAGE_PREFIX:-ghcr.io/openkb-app/openkb}-frontend:${OPENKB_TAG:-1.0.0-beta2}
-    << : [*container-defaults, *hardening]
+    <<: [*container-defaults, *hardening]
     # The shutdown flushes the collab store; give it time before SIGKILL.
     stop_grace_period: 30s
     environment:
@@ -111,11 +107,11 @@ services:
 
   mariadb:
     image: ${OPENKB_MARIADB_IMAGE:-mariadb:11.4.13}
-    << : *container-defaults
+    <<: *container-defaults
     command:
       - --transaction-isolation=READ-COMMITTED
     environment:
-      << : *mariadb-environment
+      <<: *mariadb-environment
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD}
       MARIADB_AUTO_UPGRADE: "1"
     healthcheck:
@@ -129,7 +125,7 @@ services:
 
   opensearch:
     image: ${OPENKB_OPENSEARCH_IMAGE:-opensearchproject/opensearch:3.9.0}
-    << : *container-defaults
+    <<: *container-defaults
     environment:
       discovery.type: single-node
       cluster.default_number_of_replicas: "0"

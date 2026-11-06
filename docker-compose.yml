@@ -1,0 +1,158 @@
+# OpenKB on Coolify: Drupal, the Nuxt frontend, cron, MariaDB, OpenSearch.
+#
+# Adapted from upstream's docker-compose.yml (openkb-app/openkb, 1.x):
+# - published images only, nothing is built
+# - no host ports: Coolify's proxy (Traefik) routes to the container ports
+#     drupal   -> 8080  (admin / API domain)
+#     frontend -> 3000  (primary domain)
+#   Assign the domains per service in the Coolify UI, see README.md.
+# - cron is spelled out instead of `extends`/`!reset`, which Coolify's compose
+#   parser does not need to understand.
+# - every setting is an environment variable, see .env.example. `drupal` and
+#   `cron` also receive every variable of the Coolify environment.
+
+x-container:
+  &container-defaults
+    restart: unless-stopped
+
+x-hardening:
+  &hardening
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+x-mariadb-environment:
+  &mariadb-environment
+    MARIADB_DATABASE: ${MARIADB_DATABASE:-drupal}
+    MARIADB_USER: ${MARIADB_USER:-drupal}
+    MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD}
+
+x-drupal-environment:
+  &drupal-environment
+    << : *mariadb-environment
+    DRUPAL_BASE_URL: ${DRUPAL_BASE_URL:?set DRUPAL_BASE_URL}
+    DRUPAL_FRONTEND_BASE_URL: ${DRUPAL_FRONTEND_BASE_URL:?set DRUPAL_FRONTEND_BASE_URL}
+    DRUPAL_HASH_SALT: ${DRUPAL_HASH_SALT:?set DRUPAL_HASH_SALT}
+    DRUSH_OPTIONS_URI: ${DRUPAL_BASE_URL:-}
+    # Parent domain of both hosts, leading dot. Scopes the session cookie.
+    SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:-}
+    # Coolify's Traefik reaches Drupal over the docker network.
+    REVERSE_PROXY_ADDRESSES: ${REVERSE_PROXY_ADDRESSES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+    OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
+    OKB_COLLAB_CLIENT_ID: ${OKB_COLLAB_CLIENT_ID:?set OKB_COLLAB_CLIENT_ID}
+    OKB_COLLAB_CLIENT_SECRET: ${OKB_COLLAB_CLIENT_SECRET:?set OKB_COLLAB_CLIENT_SECRET}
+    ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    OPENKB_RECIPES_DIR: ${OPENKB_RECIPES_DIR:-/app/recipes}
+    MAILER_DSN: ${MAILER_DSN:-}
+    MAIL_FROM: ${MAIL_FROM:-}
+    WEBSERVER_UPLOAD_MAX_SIZE: ${WEBSERVER_UPLOAD_MAX_SIZE:-100MB}
+    # Passed explicitly so they reach drupal and cron without an env_file.
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+
+services:
+  drupal:
+    image: ${OPENKB_IMAGE_PREFIX:-ghcr.io/openkb-app/openkb}-drupal:${OPENKB_TAG:-1.0.0-beta2}
+    << : [*container-defaults, *hardening]
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    environment:
+      << : *drupal-environment
+    expose:
+      - "8080"
+    volumes:
+      # Public and private files, config sync, OAuth keys.
+      - drupal-files:/app/files
+
+  # Drupal cron every five minutes (supercronic), same image and files volume.
+  cron:
+    image: ${OPENKB_IMAGE_PREFIX:-ghcr.io/openkb-app/openkb}-drupal:${OPENKB_TAG:-1.0.0-beta2}
+    << : [*container-defaults, *hardening]
+    # The first start copies the image's files into the shared volume; two
+    # containers starting at once collide, so drupal goes first.
+    depends_on:
+      drupal:
+        condition: service_started
+    command: ["supercronic", "/etc/crontabs/openkb"]
+    environment:
+      << : *drupal-environment
+    healthcheck:
+      disable: true
+    volumes:
+      - drupal-files:/app/files
+
+  frontend:
+    image: ${OPENKB_IMAGE_PREFIX:-ghcr.io/openkb-app/openkb}-frontend:${OPENKB_TAG:-1.0.0-beta2}
+    << : [*container-defaults, *hardening]
+    # The shutdown flushes the collab store; give it time before SIGKILL.
+    stop_grace_period: 30s
+    environment:
+      DRUPAL_BASE_URL: ${DRUPAL_BASE_URL:?set DRUPAL_BASE_URL}
+      DRUPAL_FRONTEND_BASE_URL: ${DRUPAL_FRONTEND_BASE_URL:?set DRUPAL_FRONTEND_BASE_URL}
+      OKB_COLLAB_CLIENT_ID: ${OKB_COLLAB_CLIENT_ID:?set OKB_COLLAB_CLIENT_ID}
+      OKB_COLLAB_CLIENT_SECRET: ${OKB_COLLAB_CLIENT_SECRET:?set OKB_COLLAB_CLIENT_SECRET}
+      OKB_COLLAB_IDLE_MS: ${OKB_COLLAB_IDLE_MS:-}
+      OKB_COLLAB_DRUPAL_TIMEOUT_MS: ${OKB_COLLAB_DRUPAL_TIMEOUT_MS:-}
+      OKB_COLLAB_COMMIT_QUIET_MS: ${OKB_COLLAB_COMMIT_QUIET_MS:-}
+      OKB_COLLAB_UPLOAD_COMMIT_MS: ${OKB_COLLAB_UPLOAD_COMMIT_MS:-}
+      OKB_COLLAB_COMMIT_MAX_DIRTY_MS: ${OKB_COLLAB_COMMIT_MAX_DIRTY_MS:-}
+      OKB_AGENT_SESSION_IDLE_MS: ${OKB_AGENT_SESSION_IDLE_MS:-}
+      OKB_AGENT_SESSION_MAX_MS: ${OKB_AGENT_SESSION_MAX_MS:-}
+    expose:
+      - "3000"
+    volumes:
+      # Collab snapshot store. Coupled to the database: back up both together.
+      - collab-store:/app/frontend/var
+
+  mariadb:
+    image: ${OPENKB_MARIADB_IMAGE:-mariadb:11.4.13}
+    << : *container-defaults
+    command:
+      - --transaction-isolation=READ-COMMITTED
+    environment:
+      << : *mariadb-environment
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD}
+      MARIADB_AUTO_UPGRADE: "1"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    volumes:
+      - mariadb-data:/var/lib/mysql
+
+  opensearch:
+    image: ${OPENKB_OPENSEARCH_IMAGE:-opensearchproject/opensearch:3.9.0}
+    << : *container-defaults
+    environment:
+      discovery.type: single-node
+      cluster.default_number_of_replicas: "0"
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      # Set to false if the host lacks vm.max_map_count=262144.
+      node.store.allow_mmap: ${OPENSEARCH_ALLOW_MMAP:-true}
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
+      OPENSEARCH_PLUGINS: opensearch-knn opensearch-neural-search opensearch-custom-codecs opensearch-system-templates
+    command: |
+      bash -c 'for p in $$(ls plugins); do case " $$OPENSEARCH_PLUGINS " in *" $$p "*) ;; *) rm -rf plugins/$$p config/$$p bin/$$p ;; esac; done
+      exec ./opensearch-docker-entrypoint.sh opensearch'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+volumes:
+  drupal-files:
+  collab-store:
+  mariadb-data:
+  opensearch-data:

@@ -1,0 +1,176 @@
+# documentation: https://openkb.app
+# slogan: The open knowledge base for people and AI agents: collaboratively edited Markdown pages, reviewed before they publish.
+# category: documentation
+# tags: knowledge base,wiki,documentation,drupal,nuxt,ai,collaboration,opensearch
+# logo: svgs/openkb.svg
+# port: 3000
+
+# The OpenKB stack: Drupal, the Nuxt frontend, MariaDB, OpenSearch.
+#
+# - Upstream's docker-compose.yml (openkb-app/openkb, 1.x) with the changes a
+#   Coolify template needs: published images, no build, no host ports, domains
+#   and secrets from Coolify's SERVICE_* variables, cron spelled out instead of
+#   `extends`/`!reset`. `restart` and the top-level `volumes:` are left to
+#   Coolify, which sets `unless-stopped` and declares the volumes itself.
+# - Two domains: FRONTEND (the knowledge base) and DRUPAL (admin, API, OAuth).
+#   Set SESSION_COOKIE_DOMAIN to their parent domain with a leading dot.
+# - Coolify gives every service its .env, so a secret such as an `*_API_KEY`
+#   needs no entry here.
+# - The first boot installs Drupal (~5 min). Sign in at the DRUPAL domain as
+#   `admin` with SERVICE_PASSWORD_ADMIN.
+
+x-hardening: &hardening
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+x-mariadb-environment: &mariadb-environment
+    MARIADB_DATABASE: ${MARIADB_DATABASE:-drupal}
+    MARIADB_USER: ${SERVICE_USER_MARIADB}
+    MARIADB_PASSWORD: ${SERVICE_PASSWORD_MARIADB}
+
+x-drupal-environment: &drupal-environment
+    << : *mariadb-environment
+    DRUPAL_BASE_URL: ${SERVICE_URL_DRUPAL}
+    DRUPAL_FRONTEND_BASE_URL: ${SERVICE_URL_FRONTEND}
+    DRUPAL_HASH_SALT: ${SERVICE_PASSWORD_64_HASHSALT}
+    # The site URI every drush call resolves.
+    DRUSH_OPTIONS_URI: ${SERVICE_URL_DRUPAL}
+    # Addresses or subnets whose X-Forwarded-* headers Drupal trusts. The
+    # default covers a proxy on the docker networks and on the host.
+    REVERSE_PROXY_ADDRESSES: ${REVERSE_PROXY_ADDRESSES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+    OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
+    # The collaboration server's own OAuth client (ADR 0001). The install
+    # provisions the consumer from it; the frontend presents it at /oauth/token.
+    OKB_COLLAB_CLIENT_ID: ${SERVICE_USER_COLLAB}
+    OKB_COLLAB_CLIENT_SECRET: ${SERVICE_PASSWORD_64_COLLAB}
+    # Read by the install.
+    ADMIN_PASSWORD: ${SERVICE_PASSWORD_ADMIN}
+    # Where the install finds the recipes, which the image ships.
+    OPENKB_RECIPES_DIR: ${OPENKB_RECIPES_DIR:-/app/recipes}
+    # Optional. Without MAILER_DSN no mail leaves the site; MAIL_FROM is the
+    # sender address.
+    MAILER_DSN: ${MAILER_DSN:-}
+    MAIL_FROM: ${MAIL_FROM:-}
+    # The webserver's cap on page file upload bodies; above every field limit.
+    WEBSERVER_UPLOAD_MAX_SIZE: ${WEBSERVER_UPLOAD_MAX_SIZE:-100MB}
+
+services:
+  drupal:
+    image: ghcr.io/openkb-app/openkb-drupal:1.0.0-beta2
+    << : *hardening
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    environment:
+      << : *drupal-environment
+      SERVICE_URL_DRUPAL_8080: ${SERVICE_URL_DRUPAL_8080}
+      # The parent domain of the two hosts, with a leading dot. The session
+      # cookie is scoped to it, so the browser sends it to both. The inline
+      # comment below is what Coolify shows next to the variable.
+      SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:?}  # Parent domain of both generated domains with a leading dot, e.g. .example.com
+    volumes:
+      # Public and private files, config sync, OAuth keys.
+      - openkb-drupal-files:/app/files
+
+  # Drupal cron every five minutes: supercronic runs docker/drupal/crontab in
+  # the drupal image, with drupal's environment and files.
+  cron:
+    image: ghcr.io/openkb-app/openkb-drupal:1.0.0-beta2
+    << : *hardening
+    exclude_from_hc: true
+    # Both containers mount the same files volume; on the first start the image's
+    # files are copied into it by the container that starts first, and two
+    # starting at once collide on the copy.
+    depends_on:
+      drupal:
+        condition: service_started
+    command: ["supercronic", "/etc/crontabs/openkb"]
+    environment:
+      << : *drupal-environment
+      SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:?}
+    volumes:
+      - openkb-drupal-files:/app/files
+    healthcheck:
+      disable: true
+
+  frontend:
+    image: ghcr.io/openkb-app/openkb-frontend:1.0.0-beta2
+    << : *hardening
+    # The shutdown flushes the collab store; give it time before SIGKILL.
+    stop_grace_period: 30s
+    environment:
+      SERVICE_URL_FRONTEND_3000: ${SERVICE_URL_FRONTEND_3000}
+      DRUPAL_BASE_URL: ${SERVICE_URL_DRUPAL}
+      DRUPAL_FRONTEND_BASE_URL: ${SERVICE_URL_FRONTEND}
+      OKB_COLLAB_CLIENT_ID: ${SERVICE_USER_COLLAB}
+      OKB_COLLAB_CLIENT_SECRET: ${SERVICE_PASSWORD_64_COLLAB}
+      # Collab timing knobs (frontend/server/utils/collab-timing.ts, tuning
+      # notes in docs/collab-server.md). Empty falls back to the built-in
+      # defaults.
+      OKB_COLLAB_IDLE_MS: ${OKB_COLLAB_IDLE_MS:-}
+      OKB_COLLAB_DRUPAL_TIMEOUT_MS: ${OKB_COLLAB_DRUPAL_TIMEOUT_MS:-}
+      OKB_COLLAB_COMMIT_QUIET_MS: ${OKB_COLLAB_COMMIT_QUIET_MS:-}
+      OKB_COLLAB_UPLOAD_COMMIT_MS: ${OKB_COLLAB_UPLOAD_COMMIT_MS:-}
+      OKB_COLLAB_COMMIT_MAX_DIRTY_MS: ${OKB_COLLAB_COMMIT_MAX_DIRTY_MS:-}
+      OKB_AGENT_SESSION_IDLE_MS: ${OKB_AGENT_SESSION_IDLE_MS:-}
+      OKB_AGENT_SESSION_MAX_MS: ${OKB_AGENT_SESSION_MAX_MS:-}
+    volumes:
+      # The collab snapshot store. Coupled to the database: back up and restore
+      # the two together (ADR 0008).
+      - openkb-collab-store:/app/frontend/var
+
+  mariadb:
+    image: mariadb:11.4.13
+    # The isolation level Drupal asks for.
+    command:
+      - --transaction-isolation=READ-COMMITTED
+    environment:
+      << : *mariadb-environment
+      MARIADB_ROOT_PASSWORD: ${SERVICE_PASSWORD_MARIADBROOT}
+      # Upgrades the system tables when a newer server opens an older volume.
+      MARIADB_AUTO_UPGRADE: "1"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    volumes:
+      - openkb-mariadb-data:/var/lib/mysql
+
+  opensearch:
+    image: opensearchproject/opensearch:3.9.0
+    environment:
+      discovery.type: single-node
+      # One node, so a replica has nowhere to go: it would stay unassigned and
+      # hold cluster health at yellow. A default, not a cap -- an index asking
+      # for replicas still gets them.
+      cluster.default_number_of_replicas: "0"
+      # The cluster is reachable from the stack's own network only.
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      # False drops the host's `vm.max_map_count` requirement, at the cost of
+      # read performance.
+      node.store.allow_mmap: ${OPENSEARCH_ALLOW_MMAP:-true}
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
+      # Plugins to keep; everything else is removed at container start.
+      #   knn               knn_vector field of the chunk index
+      #   neural-search     normalization-processor of the hybrid query's search pipeline
+      #   custom-codecs     index compression codecs
+      #   system-templates  built-in index templates
+      OPENSEARCH_PLUGINS: opensearch-knn opensearch-neural-search opensearch-custom-codecs opensearch-system-templates
+    command: |
+      bash -c 'for p in $$(ls plugins); do case " $$OPENSEARCH_PLUGINS " in *" $$p "*) ;; *) rm -rf plugins/$$p config/$$p bin/$$p ;; esac; done
+      exec ./opensearch-docker-entrypoint.sh opensearch'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+    volumes:
+      - openkb-opensearch-data:/usr/share/opensearch/data

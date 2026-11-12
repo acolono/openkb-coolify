@@ -1,38 +1,46 @@
 # coolify-openkbapp
 
-[OpenKB](https://github.com/openkb-app/openkb) on Coolify. `docker-compose.yml`
-is upstream's production compose file (1.x), adapted: published images only,
-no host ports, domains assigned in Coolify. Pinned to `1.0.0-beta2`.
+[OpenKB](https://github.com/openkb-app/openkb) as a Coolify service template.
+`templates/compose/openkb.yaml` is upstream's `docker-compose.yml` (1.x),
+changed only where Coolify needs it (format of `coollabsio/coolify`, logo in
+`svgs/openkb.svg`). Pinned to `1.0.0-beta2`.
 
 | Service | Container port | Domain |
 |---|---|---|
-| `frontend` (Nuxt) | 3000 | primary, e.g. `kb.example.com` |
-| `drupal` (admin, API, OAuth) | 8080 | admin, e.g. `kb-admin.example.com` |
+| `frontend` (Nuxt) | 3000 | `SERVICE_URL_FRONTEND`, the knowledge base |
+| `drupal` (admin, API, OAuth) | 8080 | `SERVICE_URL_DRUPAL` |
 | `cron`, `mariadb`, `opensearch` | internal | none |
 
 ## Deploy
 
-1. Coolify → Project → **New Resource** → Public/Private Repository (Git over
-   SSH with a deploy key) → this repo, branch `main`, build pack
-   **Docker Compose**, compose file `/docker-compose.yml`.
-2. **Domains**: set `frontend` to `https://kb.example.com:3000` and `drupal`
-   to `https://kb-admin.example.com:8080`. The `:port` tells Traefik which
-   container port to route to.
-3. **Environment variables**: copy `.env.example`, fill in the secrets
-   (`openssl rand -hex 32`) and make the URLs match step 2. Both hostnames
-   must share the parent domain in `SESSION_COOKIE_DOMAIN`.
-4. **Host**: either `sysctl -w vm.max_map_count=262144` (persist in
-   `/etc/sysctl.d/`), or set `OPENSEARCH_ALLOW_MMAP=false`. Plan for ~4 GB RAM.
-5. **Deploy.** First boot installs Drupal (~5 min; Drupal answers 503 with a
-   setup page meanwhile). Sign in at `https://<admin-domain>/user/login` as
-   `admin` (`ADMIN_PASSWORD`, or read the generated one from the drupal logs).
-6. AI chat and semantic search need `OPENAI_API_KEY`. After setting it, in the
+Coolify generates both domains and every secret; the only required input is
+the cookie domain.
+
+1. Coolify → Project → **New Resource** → **Docker Compose Empty** → paste
+   `templates/compose/openkb.yaml`.
+2. **Environment variables**: set `SESSION_COOKIE_DOMAIN` to the parent domain
+   of the two generated domains with a leading dot (e.g. `frontend-abc.example.com`
+   and `drupal-abc.example.com` → `.example.com`). Optional: `OPENAI_API_KEY`,
+   `MAILER_DSN`, `MAIL_FROM`.
+3. **Deploy.** First boot installs Drupal (~5 min, 503 meanwhile). Sign in at
+   the drupal domain `/user/login` as `admin` with `SERVICE_PASSWORD_ADMIN`
+   (shown in the environment variables).
+4. AI chat and semantic search need `OPENAI_API_KEY`. After setting it, in the
    drupal container: `drush search-api:reset-tracker kb_chunks -y`.
+
+OpenSearch uses mmap as upstream does (`OPENSEARCH_ALLOW_MMAP=true`), which
+wants `vm.max_map_count=262144` on the host (persist in `/etc/sysctl.d/`).
+Without that sysctl, set `OPENSEARCH_ALLOW_MMAP=false`. Plan for ~4 GB RAM.
+
+The template is not in Coolify's catalog: Coolify asks for 1,000 GitHub stars
+upstream and has paused outside template contributions. Coolify only applies
+its parsing to a pasted **Docker Compose Empty** resource, so test the
+template there rather than with plain `docker compose`.
 
 ## Operating
 
-* **Backups**: `drupal-files`, `collab-store` and `mariadb-data` must be backed
-  up together. `opensearch-data` is rebuildable by reindexing.
-* **Upgrades**: bump `OPENKB_TAG`, redeploy. The image runs updatedb and config
-  import on start.
+* **Backups**: `openkb-drupal-files`, `openkb-collab-store` and `openkb-mariadb-data` must be backed
+  up together. `openkb-opensearch-data` is rebuildable by reindexing.
+* **Upgrades**: bump the image tags of `drupal`, `cron` and `frontend` in the
+  template, redeploy. The image runs updatedb and config import on start.
 * The Cloudron package of this app lives in `acolono/openkb-cloudron`.
